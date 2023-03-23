@@ -1,14 +1,16 @@
 import vk_api
 from vk_api.longpoll import VkLongPoll, VkEventType
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+from random import choice
 from config import ReadConfig
-from basedata import DataBase
+from database import DataBase
 
 token_session, token_access = ReadConfig().get_tokens()
 dbname, user, password, host, port = ReadConfig().get_bd()
 
-base_data = DataBase()
-base_data.bd_connect(dbname, user, password, host, port)
+database = DataBase()
+database.bd_connect(dbname, user, password, host, port)
+database.create_table()
 
 vk_session = vk_api.VkApi(token=token_session, api_version='5.131')
 vk_access = vk_api.VkApi(token=token_access, api_version='5.131').get_api()
@@ -39,18 +41,6 @@ class BotFunc():
         return keyboard
 
     @staticmethod
-    def check_profile_button():
-        keyboard = VkKeyboard(one_time=True)
-        keyboard.add_button('Проверить!', VkKeyboardColor.PRIMARY)
-        return keyboard
-
-    @staticmethod
-    def create_list_of_people_button():
-        keyboard = VkKeyboard(one_time=True)
-        keyboard.add_button('Сформировать список!', VkKeyboardColor.SECONDARY)
-        return keyboard
-
-    @staticmethod
     def search_buttons():
         return {'Следующий': VkKeyboardColor.POSITIVE,
                 'Закончить': VkKeyboardColor.NEGATIVE}
@@ -78,7 +68,6 @@ class BotApiFunc:
     @classmethod
     def checking(cls, id):
         '''This function is designed to verify all user data'''
-
         return 'bdate' in cls.get_user_info(id) and 'sex' in cls.get_user_info(id) and cls.get_user_info(id)['city'] != None
 
     @classmethod
@@ -89,7 +78,12 @@ class BotApiFunc:
             'items'][0]['id']
         result = vk_access.users.search(
             q='', city=city_id, sex=3 - user_sex, status=6, fields='bdate', count=1000)
-        return [user for user in result['items'] if 'bdate' in user and user['bdate'].count('.') == 2 and abs(int(user['bdate'].split('.')[-1]) - int(user_bdate.split('.')[-1])) <= 5 and user['is_closed'] == False]
+
+        result = [user['id'] for user in result['items'] if 'bdate' in user and user['bdate'].count('.') == 2 and abs(
+            int(user['bdate'].split('.')[-1]) - int(user_bdate.split('.')[-1])) <= 5 and user['is_closed'] == False]
+
+        if result:
+            return result
 
     @ classmethod
     def get_top_photos(cls, user_id):
@@ -101,6 +95,36 @@ class BotApiFunc:
                         ['count'] + x['comments']['count'], reverse=True)[:3]
 
         return [f"photo{p['owner_id']}_{p['id']}" for p in photos]
+
+
+class People:
+    '''This class keep user id in cache memory'''
+    __instance_people_list = dict()
+
+    def __new__(cls, **kwargs):
+        for key, value in kwargs.items():
+            if key not in cls.__instance_people_list and not database.check_user_id_in_table(key):
+                cls.__instance_people_list[key] = value
+
+            elif key not in cls.__instance_people_list and database.check_user_id_in_table(key):
+                cls.__instance_people_list[key] = [
+                    i for i in value if i not in database.get_linked_users(key)]
+            else:
+                pass
+
+    @classmethod
+    def show_people_list(cls):
+        return cls.__instance_people_list
+
+    @classmethod
+    def get_random_cache_user(cls, user_id):
+        user_id = str(user_id)
+        if user_id in cls.__instance_people_list:
+            random_cache_user = choice(cls.__instance_people_list[user_id])
+            cls.__instance_people_list[user_id].remove(random_cache_user)
+            database.add_people_to_table(random_cache_user)
+            database.add_person_to_user(user_id, random_cache_user)
+            return random_cache_user
 
 
 not_api_func = BotFunc()
@@ -118,55 +142,42 @@ class VKinder():
                 match event.text.lower():
 
                     case 'начать':
+                        database.add_user_to_table(user_id)
                         not_api_func.write_msg(
-                            user_id, f"Йо! {api_func.get_user_info(user_id)['first_name']}. Прежде чем начать поиск нужно проверить ваш профиль на заполненность всех ваших данных!", not_api_func.check_profile_button())
-
-                    case 'проверить!':
-                        if api_func.checking(user_id):
-                            not_api_func.write_msg(
-                                user_id, 'Все отлично!', not_api_func.create_list_of_people_button())
-
-                        else:
-                            not_api_func.write_msg(
-                                user_id, 'Проверьте, на вашем профиле должны быть указаны такие параметры:\n-Ваш возраст\n-Ваш пол\n-Ваш город', not_api_func.check_profile_button())
-
-                    case 'сформировать список!':
-                        not_api_func.write_msg(
-                            user_id, 'Список формируется...')
-                        base_data.save_user_with_people_list(
-                            api_func.get_user_info(user_id), api_func.get_random_user(api_func.get_user_info(user_id)['city'], api_func.get_user_info(user_id)['sex'], api_func.get_user_info(user_id)['bdate']))
-                        not_api_func.write_msg(
-                            user_id, 'Список сформировался!', not_api_func.start_button())
+                            user_id, f"Йо! {api_func.get_user_info(user_id)['first_name']}. Для поиска пары нажми на 'Начать поиск!'", not_api_func.start_button())
 
                     case 'начать поиск!':
                         if api_func.checking(user_id):
+                            if str(user_id) not in People.show_people_list() or not People.show_people_list()[str(user_id)]:
+                                People(**{str(user_id): api_func.get_random_user(api_func.get_user_info(user_id)[
+                                    'city'], api_func.get_user_info(user_id)['sex'], api_func.get_user_info(user_id)['bdate'])})
+                            random_user = People.get_random_cache_user(
+                                user_id)
+
                             keyboard = VkKeyboard()
                             for k, v in not_api_func.search_buttons().items():
                                 keyboard.add_button(k, v)
-                            random_user_id = base_data.get_random_user(user_id)
-                            if random_user_id != None:
-                                not_api_func.write_msg(
-                                    user_id, f'{api_func.get_user_info(random_user_id)["first_name"]}\nhttps://vk.com/id{random_user_id}', keyboard, api_func.get_top_photos(random_user_id))
-                            else:
-                                not_api_func.write_msg(
-                                    user_id, 'Нужно сформировать новый список!', not_api_func.create_list_of_people_button())
+
+                            not_api_func.write_msg(
+                                user_id, f'{api_func.get_user_info(random_user)["first_name"]}\nhttps://vk.com/id{random_user}', keyboard, api_func.get_top_photos(random_user))
+
                         else:
                             not_api_func.write_msg(
-                                user_id, 'Проверьте, на вашем профиле должны быть указаны такие параметры:\n-Ваш возраст\n-Ваш пол\n-Ваш город', not_api_func.check_profile_button())
+                                user_id, 'Проверьте, на вашем профиле должны быть указаны такие параметры:\n-Ваш возраст\n-Ваш пол\n-Ваш город')
 
                     case 'следующий':
                         if api_func.checking(user_id):
-                            random_user_id = base_data.get_random_user(user_id)
-                            if random_user_id != None:
-                                not_api_func.write_msg(
-                                    user_id, f'{api_func.get_user_info(random_user_id)["first_name"]} {api_func.get_user_info(random_user_id)["last_name"]}\nhttps://vk.com/id{random_user_id}', None, api_func.get_top_photos(random_user_id))
-                            else:
-                                not_api_func.write_msg(
-                                    user_id, 'Нужно сформировать новый список!', not_api_func.create_list_of_people_button())
+                            if str(user_id) not in People.show_people_list() or not People.show_people_list()[str(user_id)]:
+                                People(**{str(user_id): api_func.get_random_user(api_func.get_user_info(user_id)[
+                                       'city'], api_func.get_user_info(user_id)['sex'], api_func.get_user_info(user_id)['bdate'])})
+                            random_user = People.get_random_cache_user(
+                                user_id)
 
+                            not_api_func.write_msg(
+                                user_id, f'{api_func.get_user_info(random_user)["first_name"]}\nhttps://vk.com/id{random_user}', None, api_func.get_top_photos(random_user))
                         else:
                             not_api_func.write_msg(
-                                user_id, 'Проверьте, на вашем профиле должны быть указаны такие параметры:\n-Ваш возраст\n-Ваш пол\n-Ваш город', not_api_func.check_profile_button())
+                                user_id, 'Проверьте, на вашем профиле должны быть указаны такие параметры:\n-Ваш возраст\n-Ваш пол\n-Ваш город')
 
                     case 'закончить':
                         not_api_func.write_msg(
