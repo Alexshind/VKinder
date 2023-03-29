@@ -1,5 +1,4 @@
 import psycopg2
-from config import ReadConfig
 
 
 class DataBase:
